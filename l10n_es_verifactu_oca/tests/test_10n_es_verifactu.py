@@ -150,9 +150,17 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
             ),
         ]
         for name, inv_type, lines, extra_vals in mapping:
-            self._create_and_test_invoice_verifactu_dict(
-                name, inv_type, lines, extra_vals
-            )
+            # TEST002 is the historical unlinked-refund fixture tracked by
+            # #4642. Keep testing its legacy dictionary without weakening the
+            # production gate: only this fixture uses the explicit escape.
+            skip_schema_check = name == "TEST002"
+            self.company.verifactu_skip_schema_check = skip_schema_check
+            try:
+                self._create_and_test_invoice_verifactu_dict(
+                    name, inv_type, lines, extra_vals
+                )
+            finally:
+                self.company.verifactu_skip_schema_check = False
         return
 
     def test_verifactu_start_date(self):

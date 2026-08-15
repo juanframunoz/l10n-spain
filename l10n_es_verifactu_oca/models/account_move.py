@@ -3,13 +3,17 @@
 # Copyright 2025 Tecnativa - Pedro M. Baeza
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 
+import logging
 from collections import OrderedDict
 from datetime import datetime
+from textwrap import indent
 
 import pytz
 
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
+
+_logger = logging.getLogger(__name__)
 
 VERIFACTU_VALID_INVOICE_STATES = ["posted"]
 VERIFACTU_OPERATION_MAPPING = {
@@ -345,19 +349,30 @@ class AccountMove(models.Model):
         """
         tax = tax_line["tax"]
         tax_base_amount = tax_line["base"]
-        tax_dict = {"BaseImponibleOimporteNoSujeto": tax_base_amount}
         operation_type = VERIFACTU_OPERATION_MAPPING.get(tax.l10n_es_type)
+        tax_dict = {}
+
+        # Mantener el orden exacto definido por el XSD oficial.
         if tax.l10n_es_type == "exento":
             tax_dict["OperacionExenta"] = tax.l10n_es_exempt_reason
+            tax_dict["BaseImponibleOimporteNoSujeto"] = tax_base_amount
             return tax_dict
+
         tax_dict["CalificacionOperacion"] = operation_type
         if operation_type in ("N1", "N2"):
+            tax_dict["BaseImponibleOimporteNoSujeto"] = tax_base_amount
             return tax_dict
+
         if tax.amount_type == "group":
-            tax_percentage = abs(tax.children_tax_ids.filtered("amount")[:1].amount)
+            tax_percentage = abs(
+                tax.children_tax_ids.filtered("amount")[:1].amount
+            )
         else:
             tax_percentage = abs(tax.amount)
-        tax_dict["TipoImpositivo"] = str(tax_percentage)
+
+        # El esquema oficial admite como máximo dos decimales.
+        tax_dict["TipoImpositivo"] = str(round(tax_percentage, 2))
+        tax_dict["BaseImponibleOimporteNoSujeto"] = tax_base_amount
         tax_dict["CuotaRepercutida"] = tax_line["amount"]
         # Recargo de equivalencia
         req_tax = self._get_verifactu_tax_req(tax)
@@ -483,18 +498,26 @@ class AccountMove(models.Model):
                     "VERI*FACTU when the company has VERI*FACTU activated."
                 )
             )
+
         verifactu_records = self.filtered(
             lambda inv: inv.verifactu_enabled and inv.aeat_state == "not_sent"
         )
         if not verifactu_records:
             return super()._post(soft=soft)
+
         with self.env.cr.savepoint():
             verifactu_records._lock_verifactu_chaining()
             res = super()._post(soft=soft)
-            for record in (res & verifactu_records).sorted(lambda inv: inv.name):
+            posted_verifactu_records = res & verifactu_records
+            schema_errors = {}
+
+            for record in posted_verifactu_records.sorted(lambda inv: inv.name):
                 record._check_verifactu_configuration()
                 record.verifactu_registration_date = datetime.now()
                 record._generate_verifactu_chaining()
+
+            # Comprobar primero que el registro y su huella existen. Si la
+            # generación falla, el mensaje debe explicar ese fallo primario.
             missing_entries = verifactu_records.filtered(
                 lambda inv: inv.state == "posted"
                 and not inv.last_verifactu_invoice_entry_id
@@ -507,7 +530,44 @@ class AccountMove(models.Model):
                         ", ".join(missing_entries.mapped("display_name")),
                     )
                 )
+
+            for record in posted_verifactu_records.sorted(lambda inv: inv.name):
+                if not record.company_id.verifactu_skip_schema_check:
+                    error = record._get_verifactu_schema_error()
+                    if error:
+                        schema_errors[record.name] = error
+
+            if schema_errors:
+                raise UserError(
+                    _(
+                        "The following invoices cannot be posted because their "
+                        "VERI*FACTU record could not be built or does not match "
+                        "the official schema:\n\n%(details)s",
+                        details="\n\n".join(
+                            "%s:\n%s" % (name, indent(error, "    "))
+                            for name, error in schema_errors.items()
+                        ),
+                    )
+                )
+
         return res
+
+    def _get_verifactu_schema_error(self):
+        """Return the reason this record would not pass the official schema."""
+        self.ensure_one()
+        try:
+            return self._validate_verifactu_registro(
+                self._get_verifactu_invoice_dict()
+            )
+        except UserError as fault:
+            return str(fault)
+        except Exception:
+            # Un fallo interno del comprobador no debe impedir facturar.
+            _logger.exception(
+                "VERI*FACTU: the schema of invoice %s could not be checked",
+                self.name,
+            )
+            return None
 
     def _check_verifactu_configuration(self, suffixes=None):
         if not suffixes:

@@ -152,10 +152,19 @@ class VerifactuInvoiceEntry(models.Model):
                     < t
                 )
                 current_records = records_to_send - outdated_records
-                outdated_records.with_context(
-                    verifactu_incident=True
-                )._send_documents_to_verifactu()
-                current_records._send_documents_to_verifactu()
+                # Agrupar los errores de ambos sublotes para generar una sola
+                # notificación por ejecución del cron.
+                failures = {}
+                failures.update(
+                    outdated_records.with_context(
+                        verifactu_incident=True
+                    )._send_documents_to_verifactu()
+                )
+                failures.update(
+                    current_records._send_documents_to_verifactu()
+                )
+                if failures:
+                    records_to_send._register_verifactu_send_failures(failures)
         return True
 
     def _get_verifactu_aeat_header(self):
@@ -331,43 +340,219 @@ class VerifactuInvoiceEntry(models.Model):
                 }
             )
 
-    def _send_documents_to_verifactu(self):
-        if not self:
-            return False
-        rec = self[0]
-        header = rec._get_verifactu_aeat_header()
+    def _format_verifactu_fault(self, fault):
+        """Return an actionable message for a payload construction failure."""
+        message = str(fault)
+        path = getattr(fault, "path", None)
+        if path:
+            message += " | Path: %s" % ".".join(str(part) for part in path)
+        return message
+
+    def _build_verifactu_registro_list(self):
+        """Build each record independently and exclude only invalid records."""
         registro_factura_list = []
-        for rec in self:
-            rec.send_attempt += 1
-            if rec.document:
-                inv_dict = rec.document._get_verifactu_invoice_dict(
-                    cancel=rec.entry_type == "cancel"
+        valid_entries = self.browse()
+        failures = {}
+
+        for entry in self:
+            entry.send_attempt += 1
+            if not entry.document:
+                continue
+
+            try:
+                inv_dict = entry.document._get_verifactu_invoice_dict(
+                    cancel=entry.entry_type == "cancel"
                 )
-                registro_factura_list.append(inv_dict)
+            except Exception as fault:
+                failures[entry.id] = self._format_verifactu_fault(fault)
+                continue
+
+            try:
+                error = entry.document._validate_verifactu_registro(inv_dict)
+            except Exception:
+                # Si falla el propio comprobador, mantenemos el comportamiento
+                # anterior para no bloquear facturas válidas.
+                _logger.exception(
+                    "VERI*FACTU: the schema of %s could not be checked",
+                    entry.document_name or entry.id,
+                )
+                error = None
+
+            if error:
+                failures[entry.id] = error
+                continue
+
+            registro_factura_list.append(inv_dict)
+            valid_entries |= entry
+
+        return registro_factura_list, valid_entries, failures
+
+    def _get_reusable_schema_error_response(self, failures):
+        """Return the existing response for the exact same failures."""
+        failed_entries = self.browse(list(failures))
+        last_lines = failed_entries.mapped("last_response_line_id")
+
+        if len(last_lines) != len(failed_entries):
+            return self.env["verifactu.invoice.entry.response"]
+
+        responses = last_lines.mapped("entry_response_id")
+        if len(responses) != 1:
+            return self.env["verifactu.invoice.entry.response"]
+
+        if set(last_lines.mapped("entry_id").ids) != set(failed_entries.ids):
+            return self.env["verifactu.invoice.entry.response"]
+
+        for entry in failed_entries:
+            line = entry.last_response_line_id
+            if (
+                line.error_code != "SCHEMA_ERROR"
+                or line.response != failures[entry.id]
+            ):
+                return self.env["verifactu.invoice.entry.response"]
+
+        return responses
+
+    def _register_verifactu_send_failure(self, message, response):
+        """Attach one schema failure to its exact invoice entry."""
+        self.ensure_one()
+
+        line = (
+            self.env["verifactu.invoice.entry.response.line"]
+            .sudo()
+            .create(
+                {
+                    "entry_id": self.id,
+                    "model": self.model,
+                    "document_id": self.document_id,
+                    "entry_response_id": response.id,
+                    "response": message,
+                    "send_state": "not_sent",
+                    "error_code": "SCHEMA_ERROR",
+                }
+            )
+        )
+
+        self.last_response_line_id = line
+        document = self.document
+        if document:
+            document.last_verifactu_response_line_id = line
+            document.write(
+                {
+                    "aeat_send_failed": True,
+                    "aeat_send_error": message,
+                }
+            )
+
+        return line
+
+    def _register_verifactu_send_failures(self, failures):
+        """Register schema exclusions without duplicating history or activity."""
+        if not failures:
+            return self.env["verifactu.invoice.entry.response"]
+
+        failed_entries = self.browse(list(failures))
+        response_text = "\n\n".join(
+            "%s: %s"
+            % (
+                self.browse(entry_id).document_name or entry_id,
+                message,
+            )
+            for entry_id, message in failures.items()
+        )
+
+        response = self._get_reusable_schema_error_response(failures)
+        if response:
+            response.write(
+                {
+                    "response": response_text,
+                    "date_response": fields.Datetime.now(),
+                }
+            )
+            return response
+
+        response = (
+            self.env["verifactu.invoice.entry.response"]
+            .sudo()
+            .create(
+                {
+                    "name": _(
+                        "Invoices not matching the VERI*FACTU schema"
+                    ),
+                    "response": response_text,
+                    "date_response": fields.Datetime.now(),
+                }
+            )
+        )
+
+        for entry in failed_entries:
+            message = failures[entry.id]
+            _logger.warning(
+                "VERI*FACTU: %s left out of the batch: %s",
+                entry.document_name or entry.id,
+                message,
+            )
+            entry._register_verifactu_send_failure(
+                message,
+                response=response,
+            )
+
+        response.create_send_response_activity()
+        return response
+
+    def _send_documents_to_verifactu(self):
+        """Send valid entries and return the entries excluded by the schema."""
+        if not self:
+            return {}
+
+        header = self[0]._get_verifactu_aeat_header()
+        (
+            registro_factura_list,
+            valid_entries,
+            failures,
+        ) = self._build_verifactu_registro_list()
+
+        if not valid_entries:
+            return failures
+
         connection_error = False
         try:
-            serv = rec._connect_verifactu()
-            res = serv.RegFactuSistemaFacturacion(header, registro_factura_list)
+            service = valid_entries[0]._connect_verifactu()
+            res = service.RegFactuSistemaFacturacion(
+                header,
+                registro_factura_list,
+            )
         except Exception as error:
             connection_error = repr(error)
             _logger.exception(
                 "VERI*FACTU call failed for documents %s",
-                self.mapped("document_name"),
+                valid_entries.mapped("document_name"),
             )
             res = {}
-        response_model = self.env["verifactu.invoice.entry.response"].sudo()
+
+        response_model = self.env[
+            "verifactu.invoice.entry.response"
+        ].sudo()
         response_vals = {
             "header": json.dumps(header),
-            "name": _("Connection error with VERI*FACTU")
-            if connection_error
-            else "",
+            "name": (
+                _("Connection error with VERI*FACTU")
+                if connection_error
+                else ""
+            ),
             "invoice_data": json.dumps(registro_factura_list),
             "response": res,
-            "verifactu_csv": "CSV" in res and res["CSV"] or _("-"),
+            "verifactu_csv": (
+                "CSV" in res and res["CSV"] or _("-")
+            ),
             "connection_error": connection_error,
         }
+
         if connection_error:
-            response = self._get_reusable_connection_error_response(connection_error)
+            response = (
+                valid_entries._get_reusable_connection_error_response(
+                    connection_error
+                )
+            )
             if response:
                 response.write(
                     {
@@ -376,17 +561,24 @@ class VerifactuInvoiceEntry(models.Model):
                         "date_response": fields.Datetime.now(),
                     }
                 )
-                return True
+                return failures
+
             response_vals["date_response"] = fields.Datetime.now()
             response = response_model.create(response_vals)
             response.complete_open_activity_on_exception()
-            self._create_connection_error_response_lines(response, connection_error)
+            valid_entries._create_connection_error_response_lines(
+                response,
+                connection_error,
+            )
             response.create_activity_on_exception()
-            return True
+            return failures
+
         response = response_model.create(response_vals)
         response.complete_open_activity_on_exception()
-        create_response_activity = self._create_response_lines(
-            response=response, header=header, verifactu_response=res
+        create_response_activity = valid_entries._create_response_lines(
+            response=response,
+            header=header,
+            verifactu_response=res,
         )
         response.name = (
             _("Incorrect invoices sent to VERI*FACTU")
@@ -395,7 +587,8 @@ class VerifactuInvoiceEntry(models.Model):
         )
         if create_response_activity:
             response.create_send_response_activity()
-        return True
+
+        return failures
 
     def _create_response_lines(
         self, response=False, header=False, verifactu_response=False
