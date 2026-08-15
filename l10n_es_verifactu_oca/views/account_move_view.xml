@@ -52,6 +52,21 @@
                                 string="Refund specific type"
                                 invisible="not verifactu_enabled or move_type != 'out_refund'"
                             />
+                            <field name="reversed_entry_id" invisible="1" />
+                            <field
+                                name="verifactu_original_document_number"
+                                string="Original document number"
+                                required="verifactu_enabled and move_type == 'out_refund' and verifactu_refund_type == 'I' and not reversed_entry_id"
+                                invisible="not verifactu_enabled or move_type != 'out_refund' or verifactu_refund_type != 'I' or reversed_entry_id"
+                                readonly="state != 'draft'"
+                            />
+                            <field
+                                name="verifactu_original_document_date"
+                                string="Original document date"
+                                required="verifactu_enabled and move_type == 'out_refund' and verifactu_refund_type == 'I' and not reversed_entry_id"
+                                invisible="not verifactu_enabled or move_type != 'out_refund' or verifactu_refund_type != 'I' or reversed_entry_id"
+                                readonly="state != 'draft'"
+                            />
                             <field
                                 name="verifactu_tax_key"
                                 string="Tax key"

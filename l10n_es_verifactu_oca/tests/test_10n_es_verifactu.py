@@ -136,6 +136,8 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
                     "fiscal_position_id": self.fp_nacional.id,
                     "verifactu_registration_key": self.fp_registration_key_01.id,
                     "verifactu_registration_date": "2026-01-01 19:20:30",
+                    "verifactu_original_document_number": "ORIGIN001",
+                    "verifactu_original_document_date": "2025-12-31",
                 },
             ),
             (
@@ -150,17 +152,9 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
             ),
         ]
         for name, inv_type, lines, extra_vals in mapping:
-            # TEST002 is the historical unlinked-refund fixture tracked by
-            # #4642. Keep testing its legacy dictionary without weakening the
-            # production gate: only this fixture uses the explicit escape.
-            skip_schema_check = name == "TEST002"
-            self.company.verifactu_skip_schema_check = skip_schema_check
-            try:
-                self._create_and_test_invoice_verifactu_dict(
-                    name, inv_type, lines, extra_vals
-                )
-            finally:
-                self.company.verifactu_skip_schema_check = False
+            self._create_and_test_invoice_verifactu_dict(
+                name, inv_type, lines, extra_vals
+            )
         return
 
     def test_verifactu_start_date(self):
@@ -243,6 +237,104 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
             )
         with self.assertRaises(ValidationError):
             self.invoice.journal_id.write({"verifactu_enabled": False})
+
+
+class TestVerifactuRectifiedDocument(TestVerifactuCommon):
+    """Identification of the original rectified document."""
+
+    def test_check_rectified_document(self):
+        # A normal invoice does not need a rectified document.
+        self.assertTrue(
+            self.invoice._check_rectified_document()
+        )
+
+        refund = self._create_test_invoice(
+            move_type="out_refund"
+        )
+        self.assertEqual(
+            refund.verifactu_refund_type,
+            "I",
+        )
+
+        # Neither linked original nor manual identification.
+        self.assertFalse(
+            refund._check_rectified_document()
+        )
+
+        # The number alone is insufficient.
+        refund.verifactu_original_document_number = (
+            "ORIGIN001"
+        )
+        self.assertFalse(
+            refund._check_rectified_document()
+        )
+
+        # Number and date form a valid manual identification.
+        refund.verifactu_original_document_date = (
+            "2025-12-31"
+        )
+        self.assertTrue(
+            refund._check_rectified_document()
+        )
+
+        # A linked original is sufficient by itself.
+        linked_refund = self._create_test_invoice(
+            move_type="out_refund"
+        )
+        linked_refund.reversed_entry_id = self.invoice
+
+        self.assertTrue(
+            linked_refund._check_rectified_document()
+        )
+
+    def _create_postable_refund(self, **extra_vals):
+        """Build a pending refund suitable for posting."""
+        vals = {
+            "company_id": self.company.id,
+            "partner_id": self.partner.id,
+            "invoice_date": "2026-01-01",
+            "move_type": "out_refund",
+            "invoice_line_ids": [
+                Command.create(
+                    {
+                        "product_id": self.product.id,
+                        "account_id": self.account_expense.id,
+                        "name": "Test line",
+                        "price_unit": 100,
+                        "quantity": 1,
+                    }
+                )
+            ],
+        }
+        vals.update(extra_vals)
+        return self.env["account.move"].create(vals)
+
+    def test_rectified_document_required_on_post(self):
+        """Posting requires a linked or manually identified original."""
+        self._activate_certificate(
+            self.certificate_password
+        )
+
+        identified = self._create_postable_refund(
+            verifactu_original_document_number="ORIGIN001",
+            verifactu_original_document_date="2025-12-31",
+        )
+
+        self.assertTrue(identified.verifactu_enabled)
+        self.assertEqual(
+            identified.aeat_state,
+            "not_sent",
+        )
+
+        identified.action_post()
+        self.assertEqual(identified.state, "posted")
+
+        not_identified = self._create_postable_refund()
+
+        with self.assertRaises(UserError):
+            not_identified.action_post()
+
+        self.assertEqual(not_identified.state, "draft")
 
 
 class TestL10nEsAeatVerifactuQR(TestVerifactuCommon):

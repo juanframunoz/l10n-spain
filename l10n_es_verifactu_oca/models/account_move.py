@@ -249,6 +249,14 @@ class AccountMove(models.Model):
                         origin._get_document_date()
                     )
                     orig_serial_number = origin._get_document_serial_number()
+                else:
+                    orig_document_date = self._get_verifactu_date(
+                        self.verifactu_original_document_date
+                    )
+                    orig_serial_number = (
+                        self.verifactu_original_document_number
+                    )
+                if orig_document_date and orig_serial_number:
                     origin_data = {
                         "IDFacturaRectificada": {
                             "IDEmisorFactura": company_vat,
@@ -583,7 +591,30 @@ class AccountMove(models.Model):
             suffixes.append(_("- There are some inconsistent taxes on lines."))
         if not self._check_all_taxes_mapped():
             suffixes.append(_("- It does not have all taxes mapped."))
+        if not self._check_rectified_document():
+            suffixes.append(
+                _(
+                    "- A rectification by differences must identify the "
+                    "original document with its number and issue date."
+                )
+            )
         return super()._check_verifactu_configuration(suffixes=suffixes)
+
+    def _check_rectified_document(self):
+        """Whether a rectification identifies its original document."""
+        self.ensure_one()
+        if (
+            self.move_type != "out_refund"
+            or self.verifactu_refund_type != "I"
+        ):
+            return True
+        return bool(
+            self.reversed_entry_id
+            or (
+                self.verifactu_original_document_number
+                and self.verifactu_original_document_date
+            )
+        )
 
     def _check_inconsistent_taxes(self):
         document_date = self._get_document_date()
