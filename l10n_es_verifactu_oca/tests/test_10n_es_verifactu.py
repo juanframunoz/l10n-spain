@@ -185,6 +185,55 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
                 name, inv_type, lines, extra_vals
             )
 
+    def test_export_mixed_exempt_e2_and_not_subject_n2(self):
+        """Regime 02 must not be propagated to an N2 service detail."""
+        invoice = self._create_and_test_invoice_verifactu_dict(
+            "TEST_EXPORT_MIXED",
+            "out_invoice",
+            [
+                (60, ["s_iva0_g_e"]),
+                (20, ["s_iva_ns"]),
+            ],
+            {
+                "fiscal_position_id": self.fp_extra.id,
+                "verifactu_registration_key": (
+                    self.fp_registration_key_02.id
+                ),
+                "verifactu_registration_date": (
+                    "2026-01-01 19:20:30"
+                ),
+            },
+        )
+
+        payload = invoice._get_verifactu_invoice_dict(
+            cancel=False
+        )
+        details = payload["RegistroAlta"]["Desglose"][
+            "DetalleDesglose"
+        ]
+
+        exempt = next(
+            detail
+            for detail in details
+            if detail.get("OperacionExenta") == "E2"
+        )
+        not_subject = next(
+            detail
+            for detail in details
+            if detail.get("CalificacionOperacion") == "N2"
+        )
+
+        self.assertEqual(exempt["ClaveRegimen"], "02")
+        self.assertEqual(not_subject["ClaveRegimen"], "01")
+        self.assertNotIn(
+            "CalificacionOperacion",
+            exempt,
+        )
+        self.assertNotIn(
+            "OperacionExenta",
+            not_subject,
+        )
+
     def test_verifactu_with_exemption_cause_e5_invoice_data(self):
         # test exemption cause E5
         mapping = [

@@ -3,7 +3,7 @@
     "IDVersion": 1.0,
     "IDFactura": {
       "IDEmisorFactura": "G87846952",
-      "NumSerieFactura": "TEST_EXPORT",
+      "NumSerieFactura": "TEST_EXPORT_MIXED",
       "FechaExpedicionFactura": "01-01-2026"
     },
     "NombreRazonEmisor": "Spanish test company",
@@ -19,14 +19,20 @@
       "DetalleDesglose": [
         {
           "Impuesto": "01",
+          "ClaveRegimen": "02",
+          "BaseImponibleOimporteNoSujeto": 60.0,
+          "OperacionExenta": "E2"
+        },
+        {
+          "Impuesto": "01",
           "ClaveRegimen": "01",
           "CalificacionOperacion": "N2",
-          "BaseImponibleOimporteNoSujeto": 200.0
+          "BaseImponibleOimporteNoSujeto": 20.0
         }
       ]
     },
     "CuotaTotal": 0.0,
-    "ImporteTotal": 200.0,
+    "ImporteTotal": 80.0,
     "Encadenamiento": {
       "PrimerRegistro": "S"
     },

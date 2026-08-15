@@ -407,6 +407,22 @@ class AccountMove(models.Model):
             raise UserError(_("There's a mismatch in taxes for RE. Check them."))
         return req_tax
 
+    def _get_verifactu_detail_registration_key_code(self, tax):
+        """Return the regime key applicable to one tax detail.
+
+        Regime 02 is reserved for exempt export details. A service that is
+        not subject because of localization rules remains an N2 operation,
+        but belongs to the general regime in its own breakdown detail.
+        """
+        self.ensure_one()
+        registration_key = self.verifactu_registration_key_code
+        if (
+            registration_key == "02"
+            and tax.l10n_es_type == "no_sujeto_loc"
+        ):
+            return "01"
+        return registration_key
+
     def _get_verifactu_taxes_and_total(self):
         self.ensure_one()
         taxes_dict = {}
@@ -436,7 +452,11 @@ class AccountMove(models.Model):
             if tax in breakdown_taxes:
                 tax_dict = {
                     "Impuesto": self.verifactu_tax_key,
-                    "ClaveRegimen": self.verifactu_registration_key_code,
+                    "ClaveRegimen": (
+                        self._get_verifactu_detail_registration_key_code(
+                            tax
+                        )
+                    ),
                 }
                 tax_dict.update(self._get_verifactu_tax_dict(tax_line, tax_lines))
                 taxes_dict["DetalleDesglose"].append(tax_dict)
