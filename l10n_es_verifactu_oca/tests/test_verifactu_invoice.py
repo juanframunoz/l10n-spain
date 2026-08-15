@@ -385,6 +385,17 @@ class TestVerifactuInvoice(TestVerifactuCommon):
             "Second entry should reference first entry as previous",
         )
 
+    def test_legacy_journal_cannot_post_customer_invoice(self):
+        journal = self.invoice.journal_id
+        self.env.cr.execute(
+            "UPDATE account_journal SET verifactu_enabled = FALSE WHERE id = %s",
+            [journal.id],
+        )
+        journal.invalidate_recordset(["verifactu_enabled"])
+        with self.assertRaises(UserError):
+            self.invoice.action_post()
+        self.assertEqual(self.invoice.state, "draft")
+
     def test_invoice_entry_creation(self):
         """Test the VERI*FACTU invoice entry creation."""
         invoice_model = self.env["verifactu.invoice.entry"]

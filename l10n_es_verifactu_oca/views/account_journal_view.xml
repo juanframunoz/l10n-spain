@@ -19,6 +19,7 @@
                 <field
                     name="verifactu_enabled"
                     invisible="not company_verifactu_enabled or type != 'sale'"
+                    readonly="company_verifactu_enabled and verifactu_enabled"
                 />
             </xpath>
         </field>

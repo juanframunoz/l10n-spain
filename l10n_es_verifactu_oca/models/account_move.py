@@ -467,6 +467,22 @@ class AccountMove(models.Model):
         )
 
     def _post(self, soft=True):
+        invalid_moves = self.filtered(
+            lambda move: (
+                move.company_id.verifactu_enabled
+                and move.journal_id.type == "sale"
+                and move.move_type in ("out_invoice", "out_refund")
+                and not move.journal_id.verifactu_enabled
+                and not move.journal_id._is_verifactu_exempt()
+            )
+        )
+        if invalid_moves:
+            raise UserError(
+                _(
+                    "Sales invoices cannot be validated in a journal without "
+                    "VERI*FACTU when the company has VERI*FACTU activated."
+                )
+            )
         verifactu_records = self.filtered(
             lambda inv: inv.verifactu_enabled and inv.aeat_state == "not_sent"
         )

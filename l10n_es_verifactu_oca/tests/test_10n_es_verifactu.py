@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from freezegun import freeze_time
 
 from odoo import Command
-from odoo.exceptions import UserError
+from odoo.exceptions import UserError, ValidationError
 from odoo.tools.misc import file_path
 
 from .common import TestVerifactuCommon
@@ -221,6 +221,20 @@ class TestL10nEsAeatVerifactu(TestVerifactuCommon):
                 name, inv_type, lines, extra_vals
             )
         return
+
+    def test_sale_journal_requires_verifactu(self):
+        with self.assertRaises(ValidationError):
+            self.env["account.journal"].create(
+                {
+                    "name": "Strict VERI*FACTU journal",
+                    "code": "SVF",
+                    "type": "sale",
+                    "company_id": self.company.id,
+                    "verifactu_enabled": False,
+                }
+            )
+        with self.assertRaises(ValidationError):
+            self.invoice.journal_id.write({"verifactu_enabled": False})
 
 
 class TestL10nEsAeatVerifactuQR(TestVerifactuCommon):
